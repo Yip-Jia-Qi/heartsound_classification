@@ -11,6 +11,7 @@ from tqdm import tqdm
 from dataset import YaseenDataset
 from utils import collate_fn, pad_sequence, count_parameters
 from wavenet import WaveNetModel
+from wav2vec import getWav2VecCLS
 import inspect
 
 class Trainer:
@@ -100,21 +101,26 @@ class Trainer:
     def load_model(self):
         model_config = self.config["model"]
         # Import and initialize the model from a separate file
-        model = WaveNetModel(
-            input_channels=model_config["input_channels"],
-            classes=model_config["classes"],
-            layers=model_config["layers"],
-            blocks=model_config["blocks"],
-            dilation_channels=model_config["dilation_channels"],
-            residual_channels=model_config["residual_channels"],
-            skip_channels=model_config["skip_channels"],
+        if model_config == "wav2vec":
+            model = getWav2VecCLS()
+        else:
+            model = WaveNetModel(
+                input_channels=model_config["input_channels"],
+                classes=model_config["classes"],
+                layers=model_config["layers"],
+                blocks=model_config["blocks"],
+                dilation_channels=model_config["dilation_channels"],
+                residual_channels=model_config["residual_channels"],
+                skip_channels=model_config["skip_channels"],
 
-            kernel_size=model_config["kernel_size"],
-            dtype=torch.FloatTensor,
-            bias=model_config["bias"],
-            fast=model_config["fast"],
-        )
+                kernel_size=model_config["kernel_size"],
+                dtype=torch.FloatTensor,
+                bias=model_config["bias"],
+                fast=model_config["fast"],
+            )
+        
         print(f'Model loaded. model has {count_parameters(model)/1e6:.2f}M params')
+        
         return model
 
     def load_data(self):
@@ -200,10 +206,16 @@ class Trainer:
             data = data.to(self.device)
             target = target.to(self.device)
 
-            data = self.transform(data)
+            # data = self.transform(data)
+            # if self.config["model"] == "wav2vec":
+            #     data = data.squeeze(1)
+            # if len(data.shape) != 2:
+            #     print(data.shape)
+            #     raise Exception
             output = self.model(data)
-
+            
             loss = F.nll_loss(output.squeeze(), target)
+            
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -242,7 +254,7 @@ class Trainer:
 
         # Check if the current loss is the best loss so far
         is_best = False
-        if curr_acc >= min(self.valid_acc):
+        if curr_acc >= max(self.valid_acc):
             print("new best found")
             is_best = True
             

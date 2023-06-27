@@ -1,7 +1,7 @@
 # Config file for Trainer
 
 # Datafiles
-runname: "testrun2"
+runname: "testWav2Vec"
 datafolder: "/scratch/jiaqi006/others/Yaseen_CHSSUMF"
 train_list: "./split_lists/training_2.txt"
 valid_list: "./split_lists/testing_2.txt" #Change this to a proper validation dataset later. Or use K-fold.
@@ -10,17 +10,7 @@ test_list: "./split_lists/testing_2.txt"
 device: cuda  # Device to use for training (cpu or cuda)
 
 # Model configuration
-model:
-  input_channels: 1
-  classes: 5
-  layers: 2
-  blocks: 3
-  dilation_channels: 32
-  residual_channels: 32
-  skip_channels: 256
-  kernel_size: 16
-  bias: false
-  fast: false
+model: wav2vec
 
 # Logging and visualization
 log_interval: 20

@@ -32,5 +32,5 @@ class YaseenDataset(Dataset):  #Inheritance
         return (waveform,sample_rate, label)
 
 if __name__ == '__main__':
-    testset = YaseenDataset("/scratch/jiaqi006/others/Yaseen_CHSSUMF",'testing_2.txt')
-    print(testset[0])
+    testset = YaseenDataset("/scratch/jiaqi006/others/Yaseen_CHSSUMF",'split_lists/testing_2.txt')
+    print(testset[0][0].shape)

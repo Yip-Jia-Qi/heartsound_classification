@@ -15,6 +15,8 @@ from wav2vec import getWav2VecCLS
 from models.ACANet import ACANet
 import inspect
 
+import logging
+
 class Trainer:
     def __init__(self, config_file):
         self.config = self.load_config(config_file)
@@ -23,15 +25,15 @@ class Trainer:
         os.makedirs(self.save_dir, exist_ok=True)
 
         self.datafolder = self.config["datafolder"]
+        self.fold_dir = self.config["fold_dir"]
+        self.n_folds = self.config["n_folds"]
         self.model = self.load_model()
-        self.train_loader, self.valid_loader, self.test_loader = self.load_data()
         self.optimizer = self.load_optimizer()
         self.scheduler = self.load_scheduler()
         self.transform = self.load_transform()
         
         self.log_interval = self.config["log_interval"]
         self.n_epoch = self.config["n_epoch"]
-        self.pbar_update = 1 / (len(self.train_loader) + len(self.test_loader))
         self.losses = []
         self.valid_acc = []
         self.curr_epoch = 1
@@ -39,6 +41,8 @@ class Trainer:
         if os.path.exists(os.path.join(self.save_dir, "checkpoint.pt")):
             self.load_checkpoint()
 
+        logging.basicConfig(level=logging.DEBUG, filename=f"./results/{self.config['runname']}/log.txt", filemode="a+",
+                        format="%(asctime)-15s %(levelname)-8s %(message)s")
     def copyModelFile(self):
         modelfile = inspect.getfile(self.model.__class__)
         save_path = os.path.join(self.save_dir, modelfile.split("/")[-1])
@@ -126,12 +130,12 @@ class Trainer:
         
         return model
 
-    def load_data(self):
+    def load_data(self,fold):
         batch_size = self.config["batch_size"]
         num_workers = self.config["num_workers"]
         pin_memory = self.config["pin_memory"]
 
-        train_set, valid_set, test_set = self.get_datasets()
+        train_set, valid_set = self.get_datasets(fold)
 
         train_loader = torch.utils.data.DataLoader(
             train_set,
@@ -151,24 +155,13 @@ class Trainer:
             pin_memory=pin_memory,
         )
 
-        test_loader = torch.utils.data.DataLoader(
-            test_set,
-            batch_size=batch_size,
-            shuffle=False,
-            drop_last=False,
-            collate_fn=collate_fn,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-        )
+        return train_loader, valid_loader
 
-        return train_loader, valid_loader, test_loader
-
-    def get_datasets(self):
+    def get_datasets(self,fold):
         # Import the train dataset from a separate file
-        train_set = YaseenDataset(self.datafolder, self.config["train_list"])
-        valid_set = YaseenDataset(self.datafolder, self.config["valid_list"]) #Change this to a proper validation dataset later. Or use K-fold.
-        test_set = YaseenDataset(self.datafolder, self.config["test_list"])
-        return train_set, valid_set, test_set
+        train_set = YaseenDataset(self.datafolder, f'{self.fold_dir}/train{fold}.txt')
+        valid_set = YaseenDataset(self.datafolder, f'{self.fold_dir}/fold{fold}.txt')
+        return train_set, valid_set
 
     def load_optimizer(self):
         optimizer_config = self.config["optimizer"]
@@ -205,7 +198,7 @@ class Trainer:
         self.model.train()
         self.model.to(self.device)
         
-        for batch_idx, (data, target) in enumerate(tqdm(self.train_loader)):
+        for batch_idx, (data, target) in enumerate(self.train_loader):
 
             data = data.to(self.device)
             target = target.to(self.device)
@@ -220,14 +213,24 @@ class Trainer:
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
-        
+            
             # record loss
             self.losses.append(loss.item()) #accessing variable that is outside the function
+
+            # Check if the current loss is the best loss so far
+            is_best = False
+            if loss.item() < min(self.losses):
+                logging.info("new best found")
+                is_best = True
+            
+            # Save the model at checkpoints
+            self.save_checkpoint(is_best, epoch)
         
         #outside loop
-        print(f"Train Epoch: {epoch}\tLoss: {loss.item():.6f}")
+        # print(f"Train Epoch: {epoch}\tLoss: {loss.item():.6f}\n")
+        logging.info(f"\nTrain Epoch: {epoch}\tLoss: {loss.item():.6f}")
 
-    def valid_epoch(self, epoch):
+    def valid_epoch(self):
         self.model.train(mode=False);  #evaluation
         self.model.to(self.device)
         correct = 0
@@ -247,27 +250,25 @@ class Trainer:
         #record acc
         curr_acc = 100. * correct / len(self.valid_loader.dataset)
         self.valid_acc.append(curr_acc)
-
-        # Check if the current loss is the best loss so far
-        is_best = False
-        if curr_acc >= max(self.valid_acc):
-            print("new best found")
-            is_best = True
-            
-        # Save the model at checkpoints
-        self.save_checkpoint(is_best, epoch)
-
-        print(f"\nValid Epoch: {epoch}\tAccuracy: {correct}/{len(self.valid_loader.dataset)} ({100. * correct / len(self.valid_loader.dataset):.0f}%)\n")
+        print(f'\nValid Accuracy: {correct}/{len(self.valid_loader.dataset)} ({100. * correct / len(self.valid_loader.dataset):.0f}%)')
+        logging.info(f'\nValid Accuracy: {correct}/{len(self.valid_loader.dataset)} ({100. * correct / len(self.valid_loader.dataset):.0f}%)')
     
     def train(self):
         self.valid_acc = []
-
         # with tqdm(total=self.n_epoch) as pbar:
-        for epoch in range(self.curr_epoch, self.n_epoch + 1):
-            self.train_epoch(epoch)#, pbar)
-            self.valid_epoch(epoch)
-            self.scheduler.step()
-        # self.test_epoch()#, pbar)
+        for k in range(1,self.n_folds+1):
+            self.train_loader, self.valid_loader = self.load_data(k)
+            print(f'Now running Fold {k}')
+            for epoch in tqdm(range(self.curr_epoch, self.n_epoch + 1)):
+                self.train_epoch(epoch)
+                self.scheduler.step()
+            self.valid_epoch()
+        print(self.valid_acc)
+        print("overall acc:",sum(self.valid_acc)/len(self.valid_acc))
+        logging.info(self.valid_acc)
+        logging.info(f'overall acc: {sum(self.valid_acc)/len(self.valid_acc)}')
+        
+        # self.test()
 
     def test(self):
         self.load_bestmodel()

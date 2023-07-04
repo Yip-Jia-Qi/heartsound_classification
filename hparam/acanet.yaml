@@ -1,7 +1,7 @@
 # Config file for Trainer
 
 # Datafiles
-runname: "testWav2Vec2"
+runname: acanettest2
 datafolder: "/scratch/jiaqi006/others/Yaseen_CHSSUMF"
 train_list: "./split_lists/training_2.txt"
 valid_list: "./split_lists/testing_2.txt" #Change this to a proper validation dataset later. Or use K-fold.
@@ -10,14 +10,28 @@ test_list: "./split_lists/testing_2.txt"
 device: cuda  # Device to use for training (cpu or cuda)
 
 # Model configuration
-model: wav2vec
+model:
+  model_name: acanet
+  ch_in: 1
+  latent_dim: 32
+  embed_dim: 32
+  embed_reps: 1
+  attn_mlp_dim: 128
+  trnfr_mlp_dim: 128
+  trnfr_heads: 8 
+  dropout: 0.2 
+  trnfr_layers: 3 
+  n_blocks: 1
+  max_len: 10000
+  final_layer: '1dE'
+  out_class: 5
 
 # Logging and visualization
-log_interval: 20
-n_epoch: 8
+log_interval: 2
+n_epoch: 5
 
 # Training and optimization parameters
-batch_size: 25
+batch_size: 5
 num_workers: 4
 pin_memory: true
 optimizer:

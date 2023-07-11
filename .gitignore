@@ -1,5 +1,7 @@
 results/*
 logs/*
-__pycache__/*
+*.pyc
+__pycache__*
+models/__pycache__*
 train.py
 prepare_y18_splits_imbalanced.py

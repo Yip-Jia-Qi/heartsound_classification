@@ -1,10 +1,13 @@
 # Config file for Trainer
 
 # Datafiles
-runname: acanet_bigtrain
+runname: test
 datafolder: "/scratch/jiaqi006/others/Yaseen_CHSSUMF"
 fold_dir: Y18_10_fold
 n_folds: 10
+
+pascal_dir: /scratch/jiaqi006/others/PASCAL
+pascal_split_dir: ./pascal_lists
 # Device settings
 device: cuda  # Device to use for training (cpu or cuda)
 
@@ -19,7 +22,7 @@ model:
   trnfr_mlp_dim: 128
   trnfr_heads: 8 
   dropout: 0.2 
-  trnfr_layers: 3 
+  trnfr_layers: 1
   n_blocks: 1
   max_len: 10000
   final_layer: '1dE'
@@ -27,7 +30,7 @@ model:
 
 # Logging and visualization
 log_interval: 2
-n_epoch: 100
+n_epoch: 3
 
 # Training and optimization parameters
 batch_size: 5

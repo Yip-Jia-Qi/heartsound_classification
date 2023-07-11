@@ -70,7 +70,6 @@ class PascalDataset(Dataset):  #Inheritance
         try:
             label=self.label_to_index(self.label_cleaner(s))
         except:
-            print(s)
             raise Exception(s,self.label_cleaner(s))
         return (waveform,sample_rate, label)
 
@@ -80,8 +79,8 @@ if __name__ == '__main__':
 
     data_dir = "/scratch/jiaqi006/others/PASCAL"
     dataA = PascalDataset(data_dir,"./pascal_lists/DatasetA_n_m.txt","A")
-    print(dataA[0])
+    print(dataA[0][0].shape)
     dataBc = PascalDataset(data_dir,"./pascal_lists/DatasetB_clean_n_m.txt","B_clean")
-    print(dataBc[0])
+    print(dataBc[0][0].shape)
     dataBn = PascalDataset(data_dir,"./pascal_lists/DatasetB_noisy_n_m.txt","B_noisy")
-    print(dataBn[0])
+    print(dataBn[0][0].shape)

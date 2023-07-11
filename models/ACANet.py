@@ -271,12 +271,13 @@ class ACANet(nn.Module):
             latent = latent.permute(1,2,0) #does not matter as long as batch is put back into the first dimension
             latent = latent.flatten(1,2)
         out = self.ch_compression(latent)
-        out = self.final_norm(out.squeeze()).unsqueeze(1)
+        if out.shape[0] > 1:
+            out = self.final_norm(out.squeeze()).unsqueeze(1)
         # Finally, we project the output to the number of target classes
 
         if self.out_class != None:
-            out = self.classifier(out).squeeze()
-            out = torch.nn.functional.log_softmax(out, dim=-1)
+            out = self.classifier(out).squeeze(1)
+            out = torch.nn.functional.softmax(out, dim=-1)
 
         return out #reorder inputs back to [Batch, filters, time] format for the rest of speechbrain
     

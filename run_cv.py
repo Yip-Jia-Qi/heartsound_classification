@@ -11,7 +11,8 @@ if __name__ == "__main__":
     config_file = sys.argv[1]
     trainer = Trainer(config_file)
 
-    trainer.train()
+    # trainer.train_cv()
+    trainer.test_OOD_cv()
     # trainer.test()    
     # Start training
     # with tqdm(total=trainer.n_epoch) as pbar:

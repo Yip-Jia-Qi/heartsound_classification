@@ -8,7 +8,7 @@ import torchaudio.transforms as transforms
 import torch.optim as optim
 import torch.nn.functional as F
 from tqdm import tqdm
-from dataset import YaseenDataset
+from dataset import YaseenDataset, PascalDataset
 from utils import collate_fn, pad_sequence, count_parameters
 from wavenet import WaveNetModel
 from wav2vec import getWav2VecCLS
@@ -27,10 +27,13 @@ class Trainer:
         self.datafolder = self.config["datafolder"]
         self.fold_dir = self.config["fold_dir"]
         self.n_folds = self.config["n_folds"]
-        self.model = self.load_model()
-        self.optimizer = self.load_optimizer()
-        self.scheduler = self.load_scheduler()
+
         self.transform = self.load_transform()
+        
+        #Folder Locations for Testing Dataset
+        # data_dir = "/scratch/jiaqi006/others/PASCAL"
+        self.pascal_dir = self.config["pascal_dir"]
+        self.pascal_split_dir = self.config["pascal_split_dir"]
         
         self.log_interval = self.config["log_interval"]
         self.n_epoch = self.config["n_epoch"]
@@ -49,9 +52,9 @@ class Trainer:
         shutil.copyfile(modelfile, save_path)
         self.saved_model_file = save_path
 
-    def save_checkpoint(self, is_best, epoch):
-        checkpoint_path = os.path.join(self.save_dir, "checkpoint.pt")
-        best_model_path = os.path.join(self.save_dir, "best_model.pt")
+    def save_checkpoint(self, is_best, fold, epoch):
+        checkpoint_path = os.path.join(self.save_dir, f'{fold}_checkpoint.pt')
+        best_model_path = os.path.join(self.save_dir, f'{fold}_best_model.pt')
         
         # Save the current model state
         torch.save({
@@ -64,9 +67,10 @@ class Trainer:
         # If this is the best model, save a separate copy as the best model
         if is_best:
             shutil.copyfile(checkpoint_path, best_model_path)
+            print("best model copied!")
 
-    def load_checkpoint(self):
-        checkpoint_path = os.path.join(self.save_dir, "checkpoint.pt")
+    def load_checkpoint(self, fold):
+        checkpoint_path = os.path.join(self.save_dir, f'{fold}_checkpoint.pt')
         checkpoint = torch.load(checkpoint_path)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -92,11 +96,11 @@ class Trainer:
         # Load the model state from the checkpoint
         # self.model.load_state_dict(torch.load(checkpoint_path))
 
-    def load_bestmodel(self):
-        best_model_path = os.path.join(self.save_dir, "best_model.pt")
+    def load_bestmodel(self, fold):
+        best_model_path = os.path.join(self.save_dir, f'{fold}_best_model.pt')
         checkpoint = torch.load(best_model_path)
         self.model.load_state_dict(checkpoint['model_state_dict'])
-        print(f'Best model from Epoch {checkpoint["epoch"]} loaded!')
+        print(f'Best model from fold {fold}, Epoch {checkpoint["epoch"]} loaded!')
 
     def load_config(self, config_file):
         with open(config_file, "r") as f:
@@ -163,6 +167,50 @@ class Trainer:
         valid_set = YaseenDataset(self.datafolder, f'{self.fold_dir}/fold{fold}.txt')
         return train_set, valid_set
 
+    def load_pascal_data(self):
+        batch_size = self.config["batch_size"]
+        num_workers = self.config["num_workers"]
+        pin_memory = self.config["pin_memory"]
+
+        dataA, dataBc, dataBn = self.get_pascal_datasets()
+
+        dataA_loader = torch.utils.data.DataLoader(
+            dataA,
+            batch_size=batch_size,
+            shuffle=True,
+            collate_fn=collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+        )
+
+        dataBc_loader = torch.utils.data.DataLoader(
+            dataBc,
+            batch_size=batch_size,
+            shuffle=True,
+            collate_fn=collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+        )
+
+        dataBn_loader = torch.utils.data.DataLoader(
+            dataBn,
+            batch_size=batch_size,
+            shuffle=True,
+            collate_fn=collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+        )
+
+        return dataA_loader, dataBc_loader, dataBn_loader 
+
+    def get_pascal_datasets(self):
+        
+        dataA = PascalDataset(self.pascal_dir,f'{self.pascal_split_dir}/DatasetA_n_m.txt',"A")
+        dataBc = PascalDataset(self.pascal_dir,f'{self.pascal_split_dir}/DatasetB_clean_n_m.txt',"B_clean")
+        dataBn = PascalDataset(self.pascal_dir,f'{self.pascal_split_dir}/DatasetB_noisy_n_m.txt',"B_noisy")
+
+        return dataA, dataBc, dataBn
+
     def load_optimizer(self):
         optimizer_config = self.config["optimizer"]
         return optim.Adam(
@@ -194,10 +242,11 @@ class Trainer:
         # find most likely label index for each element in the batch
         return tensor.argmax(dim=-1)
 
-    def train_epoch(self, epoch):
+    def train_epoch(self, fold, epoch):
         self.model.train()
         self.model.to(self.device)
         
+        #Loop for one epoch
         for batch_idx, (data, target) in enumerate(self.train_loader):
 
             data = data.to(self.device)
@@ -207,84 +256,155 @@ class Trainer:
             data = self.transform(data)
             output = self.model(data)
             
-            loss = F.nll_loss(output.squeeze(), target)
+            mapped_target = torch.tensor(list(map(lambda x: 0 if x == 0 else 1, target))).to(self.device)
+            mapped_output = torch.stack((output[:,0],output[:,1:].sum(dim=1)),dim=1)
+
+            loss1 = F.cross_entropy(output.squeeze(), target)
+            loss2 = F.cross_entropy(mapped_output, mapped_target)
             
+            loss = loss1+loss2
 
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
             
-            # record loss
-            self.losses.append(loss.item()) #accessing variable that is outside the function
+        # test model
+        acc = self.test_ds(self.model, self.valid_loader)
+        
+        # self.losses.append(loss.item()) #accessing variable that is outside the function
 
-            # Check if the current loss is the best loss so far
-            is_best = False
-            if loss.item() < min(self.losses):
-                logging.info("new best found")
-                is_best = True
-            
-            # Save the model at checkpoints
-            self.save_checkpoint(is_best, epoch)
+        # Check if the current loss is the best loss so far
+        is_best = False
+        logging.info(f'Current acc: {acc}, best acc: {self.epoch_best_acc}, acc>best acc: {acc > self.epoch_best_acc}')
+        if acc > self.epoch_best_acc:
+            self.epoch_best_acc = acc
+            logging.info("new best found")
+            is_best = True
+        
+        # Save the model at checkpoints
+        self.save_checkpoint(is_best, fold, epoch)
         
         #outside loop
         # print(f"Train Epoch: {epoch}\tLoss: {loss.item():.6f}\n")
-        logging.info(f"\nTrain Epoch: {epoch}\tLoss: {loss.item():.6f}")
+        logging.info(f'\nTrain Epoch: {epoch}\tLoss: {loss.item():.6f}')
 
-    def valid_epoch(self):
-        self.model.train(mode=False);  #evaluation
-        self.model.to(self.device)
-        correct = 0
+    # def valid_epoch(self):
+    #     self.model.train(mode=False);  #evaluation
+    #     self.model.to(self.device)
+    #     correct = 0
         
-        for data, target in self.valid_loader:
+    #     for data, target in self.valid_loader:
 
-            data = data.to(self.device)
-            target = target.to(self.device)
+    #         data = data.to(self.device)
+    #         target = target.to(self.device)
 
-            # apply transform and model on whole batch directly on device
-            data = self.transform(data)
-            output = self.model(data)
+    #         # apply transform and model on whole batch directly on device
+    #         data = self.transform(data)
+    #         output = self.model(data)
 
-            pred = self.get_likely_index(output)
-            correct += self.number_of_correct(pred, target)
+    #         pred = self.get_likely_index(output)
+    #         correct += self.number_of_correct(pred, target)
 
-        #record acc
-        curr_acc = 100. * correct / len(self.valid_loader.dataset)
-        self.valid_acc.append(curr_acc)
-        print(f'\nValid Accuracy: {correct}/{len(self.valid_loader.dataset)} ({100. * correct / len(self.valid_loader.dataset):.0f}%)')
-        logging.info(f'\nValid Accuracy: {correct}/{len(self.valid_loader.dataset)} ({100. * correct / len(self.valid_loader.dataset):.0f}%)')
-    
-    def train(self):
-        self.valid_acc = []
-        # with tqdm(total=self.n_epoch) as pbar:
+    #     #record acc
+    #     curr_acc = 100. * correct / len(self.valid_loader.dataset)
+    #     self.valid_acc.append(curr_acc)
+    #     print(f'\nValid Accuracy: {correct}/{len(self.valid_loader.dataset)} ({100. * correct / len(self.valid_loader.dataset):.0f}%)')
+    #     logging.info(f'\nValid Accuracy: {correct}/{len(self.valid_loader.dataset)} ({100. * correct / len(self.valid_loader.dataset):.0f}%)')
+
+    def train_cv(self):
+        self.fold_best = []
+        
+        #loop for all folds
         for k in range(1,self.n_folds+1):
             self.train_loader, self.valid_loader = self.load_data(k)
+
+            #reload everything
+            self.model = self.load_model()
+            self.optimizer = self.load_optimizer()
+            self.scheduler = self.load_scheduler()
             print(f'Now running Fold {k}')
+
+            #loop for all epochs in one fold
             for epoch in tqdm(range(self.curr_epoch, self.n_epoch + 1)):
-                self.train_epoch(epoch)
+                self.epoch_best_acc = 0
+                self.train_epoch(k, epoch)
                 self.scheduler.step()
-            self.valid_epoch()
-        print(self.valid_acc)
-        print("overall acc:",sum(self.valid_acc)/len(self.valid_acc))
-        logging.info(self.valid_acc)
-        logging.info(f'overall acc: {sum(self.valid_acc)/len(self.valid_acc)}')
-        
-        # self.test()
+            
+            #record best accuracy of the fold
+            self.fold_best.append(self.epoch_best_acc)
 
-    def test(self):
-        self.load_bestmodel()
-        self.model.train(mode=False);  #evaluation
-        self.model.to(self.device)
+        print("overall acc:",sum(self.fold_best)/len(self.fold_best))
+        logging.info(f'list of fold best: {self.fold_best}')
+        logging.info(f'overall acc: {sum(self.fold_best)/len(self.fold_best)}')
+
+    def test_ds(self, model, dataloader):
+        model.train(mode=False);  #evaluation
+        model.to(self.device)
         correct = 0
-        for data, target in self.test_loader:
 
+        for data, target in dataloader:
             data = data.to(self.device)
             target = target.to(self.device)
 
             # apply transform and model on whole batch directly on device
             data = self.transform(data)
-            output = self.model(data)
-
+            output = model(data)
             pred = self.get_likely_index(output)
             correct += self.number_of_correct(pred, target)
+        
+        acc = correct/len(dataloader.dataset)
+        return acc
 
-        print(f"\nTest Accuracy: {correct}/{len(self.test_loader.dataset)} ({100. * correct / len(self.test_loader.dataset):.0f}%)\n")
+    def test_OOD(self, fold):
+        self.model = self.load_model()
+        self.load_bestmodel(fold)
+        self.model.train(mode=False);  #evaluation
+        self.model.to(self.device)
+        
+
+        dataloaders = self.load_pascal_data() #tuple of the following: "Dataset A", "Dataset B clean", "Dataset B noisy"
+        dataset_names = ["Dataset A", "Dataset B clean", "Dataset B noisy"]
+        test_accs = []
+
+        for name_id, dataloader in enumerate(dataloaders):
+            print(f'testing on {dataset_names[name_id]}...')
+            correct = 0
+            for data, target in dataloader:
+
+                data = data.to(self.device)
+                target = target.to(self.device)
+
+                # apply transform and model on whole batch directly on device
+                data = self.transform(data)
+                output = self.model(data)
+                pred = self.get_likely_index(output)
+                map_index = lambda x: 0 if x==0 else 1
+                pred = torch.tensor(list(map_index(i) for i in pred)).to(self.device)
+
+
+                correct += self.number_of_correct(pred, target)
+            
+            acc = correct/len(dataloader.dataset)
+            test_accs.append(acc)
+
+        return test_accs
+    
+    def test_OOD_cv(self):
+        self.fold_best_OOD = {
+            "Dataset A": [],
+            "Dataset Bc": [],
+            "Dataset Bn": []
+        }
+        
+        #loop for all folds
+        for k in range(1,self.n_folds+1):
+            accs = self.test_OOD(k)
+            for i, dataset in enumerate(self.fold_best_OOD.keys()):
+                self.fold_best_OOD[dataset].append(accs[i])
+        
+        print(f'list of fold best: {self.fold_best_OOD}')
+        logging.info(f'list of fold best: {self.fold_best_OOD}')
+
+        for i, dataset in enumerate(self.fold_best_OOD.keys()):
+            print(f'average acc for {dataset}: {sum(self.fold_best_OOD[dataset])/len(self.fold_best_OOD[dataset])}')
+            logging.info(f'average acc for {dataset}: {sum(self.fold_best_OOD[dataset])/len(self.fold_best_OOD[dataset])}')

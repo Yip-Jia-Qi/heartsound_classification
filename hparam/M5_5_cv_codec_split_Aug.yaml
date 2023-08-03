@@ -1,10 +1,13 @@
 # Config file for Trainer
 
 # Datafiles
-runname: acanet_S_cv_50ep
+runname: M5_cv_codec_split_Aug
 datafolder: "/scratch/jiaqi006/others/Yaseen_CHSSUMF"
 fold_dir: Y18_10_fold
 n_folds: 10
+
+codec_augment: True
+double_loss: False
 
 pascal_dir: /scratch/jiaqi006/others/PASCAL
 pascal_split_dir: ./pascal_lists
@@ -13,20 +16,11 @@ device: cuda  # Device to use for training (cpu or cuda)
 
 # Model configuration
 model:
-  model_name: acanet
-  ch_in: 1
-  latent_dim: 32
-  embed_dim: 32
-  embed_reps: 1
-  attn_mlp_dim: 128
-  trnfr_mlp_dim: 128
-  trnfr_heads: 8 
-  dropout: 0.2 
-  trnfr_layers: 1
-  n_blocks: 1
-  max_len: 10000
-  final_layer: '1dE'
-  out_class: 5
+  model_name: M5
+  n_input: 1
+  n_output: 5
+  stride: 16
+  n_channel: 32
 
 # Logging and visualization
 log_interval: 2
@@ -46,6 +40,6 @@ scheduler:
 # Data transformation settings
 transform:
   orig_freq: 8000
-  new_freq: 8000
+  new_freq: 2000
 
 

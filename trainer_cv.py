@@ -1,6 +1,6 @@
 import os
 import shutil
-
+import csv
 import yaml
 import torch
 import torchaudio
@@ -13,7 +13,9 @@ from utils import collate_fn, pad_sequence, count_parameters
 from wavenet import WaveNetModel
 from wav2vec import getWav2VecCLS
 from models.ACANet import ACANet
+from models.M5 import M5
 import inspect
+from report import calculate_metrics
 
 import logging
 
@@ -67,7 +69,7 @@ class Trainer:
         # If this is the best model, save a separate copy as the best model
         if is_best:
             shutil.copyfile(checkpoint_path, best_model_path)
-            print("best model copied!")
+            logging.info(f'best model copied at epoch {epoch}')
 
     def load_checkpoint(self, fold):
         checkpoint_path = os.path.join(self.save_dir, f'{fold}_checkpoint.pt')
@@ -112,8 +114,10 @@ class Trainer:
         # Import and initialize the model from a separate file
         if model_config == "wav2vec":
             model = getWav2VecCLS()
-        if model_config["model_name"] == "acanet":
+        elif model_config["model_name"] == "acanet":
             model = ACANet(**model_config)
+        elif model_config["model_name"] == "M5":
+            model = M5(**model_config)
         else:
             model = WaveNetModel(
                 input_channels=model_config["input_channels"],
@@ -139,7 +143,7 @@ class Trainer:
         num_workers = self.config["num_workers"]
         pin_memory = self.config["pin_memory"]
 
-        train_set, valid_set = self.get_datasets(fold)
+        train_set, valid_set_original, valid_set_codec = self.get_datasets(fold, self.config["codec_augment"])
 
         train_loader = torch.utils.data.DataLoader(
             train_set,
@@ -150,8 +154,8 @@ class Trainer:
             pin_memory=pin_memory,
         )
 
-        valid_loader = torch.utils.data.DataLoader(
-            valid_set,
+        valid_loader_original = torch.utils.data.DataLoader(
+            valid_set_original,
             batch_size=batch_size,
             shuffle=True,
             collate_fn=collate_fn,
@@ -159,13 +163,23 @@ class Trainer:
             pin_memory=pin_memory,
         )
 
-        return train_loader, valid_loader
+        valid_loader_codec = torch.utils.data.DataLoader(
+            valid_set_codec,
+            batch_size=batch_size,
+            shuffle=True,
+            collate_fn=collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+        )
 
-    def get_datasets(self,fold):
+        return train_loader, valid_loader_original, valid_loader_codec
+
+    def get_datasets(self,fold, codec_augment = False):
         # Import the train dataset from a separate file
-        train_set = YaseenDataset(self.datafolder, f'{self.fold_dir}/train{fold}.txt')
-        valid_set = YaseenDataset(self.datafolder, f'{self.fold_dir}/fold{fold}.txt')
-        return train_set, valid_set
+        train_set = YaseenDataset(self.datafolder, f'{self.fold_dir}/train{fold}.txt', codec_augment, True)
+        valid_set_original = YaseenDataset(self.datafolder, f'{self.fold_dir}/fold{fold}.txt', False, True)
+        valid_set_codec = YaseenDataset(self.datafolder, f'{self.fold_dir}/fold{fold}.txt', True, False)
+        return train_set, valid_set_original, valid_set_codec
 
     def load_pascal_data(self):
         batch_size = self.config["batch_size"]
@@ -227,12 +241,16 @@ class Trainer:
             gamma=scheduler_config["gamma"],
         )
 
-    def load_transform(self):
+    def load_transform(self, orig_freq = None, new_freq = None):
         transform_config = self.config["transform"]
+        if orig_freq is not None:
+            print(f'Orig_freq: {orig_freq}')
+        if new_freq is not None:
+            print(f'New_fred: {new_freq}')
         return transforms.Resample(
-            orig_freq=transform_config["orig_freq"],
-            new_freq=transform_config["new_freq"],
-        )
+            orig_freq=transform_config["orig_freq"] if orig_freq == None else orig_freq,
+            new_freq=transform_config["new_freq"] if new_freq == None else new_freq,
+        ).to(self.device)
 
     def number_of_correct(self, pred, target):
         # count number of correct predictions
@@ -259,28 +277,38 @@ class Trainer:
             mapped_target = torch.tensor(list(map(lambda x: 0 if x == 0 else 1, target))).to(self.device)
             mapped_output = torch.stack((output[:,0],output[:,1:].sum(dim=1)),dim=1)
 
-            loss1 = F.cross_entropy(output.squeeze(), target)
-            loss2 = F.cross_entropy(mapped_output, mapped_target)
-            
-            loss = loss1+loss2
+            if self.config["double_loss"]:
+                loss1 = F.cross_entropy(output.squeeze(), target)
+                loss2 = F.cross_entropy(mapped_output, mapped_target)
+                
+                loss = loss1+loss2
+            else:
+                loss = F.cross_entropy(output.squeeze(), target)
 
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
             
         # test model
-        acc = self.test_ds(self.model, self.valid_loader)
-        
-        # self.losses.append(loss.item()) #accessing variable that is outside the function
+        acc_original = self.test_ds(self.model, self.valid_loader_original)
+        acc_codec = self.test_ds(self.model, self.valid_loader_codec)
 
         # Check if the current loss is the best loss so far
         is_best = False
-        logging.info(f'Current acc: {acc}, best acc: {self.epoch_best_acc}, acc>best acc: {acc > self.epoch_best_acc}')
-        if acc > self.epoch_best_acc:
-            self.epoch_best_acc = acc
+        is_best_codec = False
+        logging.info(f'Current org acc: {acc_original}, best acc: {self.epoch_best_acc}, acc>best acc: {acc_original > self.epoch_best_acc}')
+        logging.info(f'Current org codec acc: {acc_codec}, best codec acc: {self.epoch_best_acc_codec}, acc_codec>best codec acc: {acc_codec > self.epoch_best_acc_codec}')
+        
+        if acc_original > self.epoch_best_acc:
+            self.epoch_best_acc = acc_original
             logging.info("new best found")
             is_best = True
         
+        if acc_codec > self.epoch_best_acc_codec:
+            self.epoch_best_acc_codec = acc_codec
+            logging.info("new codec best found")
+            is_best_codec = True
+
         # Save the model at checkpoints
         self.save_checkpoint(is_best, fold, epoch)
         
@@ -288,35 +316,13 @@ class Trainer:
         # print(f"Train Epoch: {epoch}\tLoss: {loss.item():.6f}\n")
         logging.info(f'\nTrain Epoch: {epoch}\tLoss: {loss.item():.6f}')
 
-    # def valid_epoch(self):
-    #     self.model.train(mode=False);  #evaluation
-    #     self.model.to(self.device)
-    #     correct = 0
-        
-    #     for data, target in self.valid_loader:
-
-    #         data = data.to(self.device)
-    #         target = target.to(self.device)
-
-    #         # apply transform and model on whole batch directly on device
-    #         data = self.transform(data)
-    #         output = self.model(data)
-
-    #         pred = self.get_likely_index(output)
-    #         correct += self.number_of_correct(pred, target)
-
-    #     #record acc
-    #     curr_acc = 100. * correct / len(self.valid_loader.dataset)
-    #     self.valid_acc.append(curr_acc)
-    #     print(f'\nValid Accuracy: {correct}/{len(self.valid_loader.dataset)} ({100. * correct / len(self.valid_loader.dataset):.0f}%)')
-    #     logging.info(f'\nValid Accuracy: {correct}/{len(self.valid_loader.dataset)} ({100. * correct / len(self.valid_loader.dataset):.0f}%)')
-
     def train_cv(self):
         self.fold_best = []
+        self.fold_best_codec = []
         
         #loop for all folds
         for k in range(1,self.n_folds+1):
-            self.train_loader, self.valid_loader = self.load_data(k)
+            self.train_loader, self.valid_loader_original, self.valid_loader_codec = self.load_data(k)
 
             #reload everything
             self.model = self.load_model()
@@ -325,17 +331,25 @@ class Trainer:
             print(f'Now running Fold {k}')
 
             #loop for all epochs in one fold
+            self.epoch_best_acc = 0
+            self.epoch_best_acc_codec = 0
+
             for epoch in tqdm(range(self.curr_epoch, self.n_epoch + 1)):
-                self.epoch_best_acc = 0
                 self.train_epoch(k, epoch)
                 self.scheduler.step()
             
             #record best accuracy of the fold
             self.fold_best.append(self.epoch_best_acc)
+            self.fold_best_codec.append(self.epoch_best_acc_codec)
 
         print("overall acc:",sum(self.fold_best)/len(self.fold_best))
+        print("overall acc codec:",sum(self.fold_best_codec)/len(self.fold_best_codec))
+        
         logging.info(f'list of fold best: {self.fold_best}')
+        logging.info(f'list of fold best codec: {self.fold_best_codec}')
+
         logging.info(f'overall acc: {sum(self.fold_best)/len(self.fold_best)}')
+        logging.info(f'overall acc codec: {sum(self.fold_best_codec)/len(self.fold_best_codec)}')
 
     def test_ds(self, model, dataloader):
         model.train(mode=False);  #evaluation
@@ -361,13 +375,26 @@ class Trainer:
         self.model.train(mode=False);  #evaluation
         self.model.to(self.device)
         
-
         dataloaders = self.load_pascal_data() #tuple of the following: "Dataset A", "Dataset B clean", "Dataset B noisy"
-        dataset_names = ["Dataset A", "Dataset B clean", "Dataset B noisy"]
+        _, valid_loader_original, valid_loader_codec = self.load_data(fold)
+        dataloaders = dataloaders + (valid_loader_original,)
+        dataloaders = dataloaders + (valid_loader_codec,)
+
+        dataset_names = ["Dataset A", "Dataset B clean", "Dataset B noisy", "Y18_Original","Y18_Codec"]
+
+
         test_accs = []
 
         for name_id, dataloader in enumerate(dataloaders):
             print(f'testing on {dataset_names[name_id]}...')
+
+            #For saving the output files
+            save_file = os.path.join(self.save_dir, f'predictions/{fold}_{dataset_names[name_id]}.csv')
+            os.makedirs(os.path.join(self.save_dir, f'predictions'), exist_ok=True)
+            save_targs = []
+            save_preds = []
+
+            self.transform = self.load_transform(dataloader.dataset[0][1])
             correct = 0
             for data, target in dataloader:
 
@@ -378,12 +405,23 @@ class Trainer:
                 data = self.transform(data)
                 output = self.model(data)
                 pred = self.get_likely_index(output)
-                map_index = lambda x: 0 if x==0 else 1
-                pred = torch.tensor(list(map_index(i) for i in pred)).to(self.device)
-
-
+                
+                if name_id < 3:
+                    map_index = lambda x: 0 if x==0 else 1
+                    pred = torch.tensor(list(map_index(i) for i in pred)).to(self.device)
+                
+                save_targs = [*save_targs,*target.tolist()]
+                save_preds = [*save_preds,*pred.tolist()]
                 correct += self.number_of_correct(pred, target)
             
+            #combine lists for saving into csv
+            save_output = list(zip(save_targs, save_preds))
+            with open(save_file, 'w', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(['Targets', 'Predictions'])  # Write the header row
+                writer.writerows(save_output)  # Write the data rows
+
+            calculate_metrics(save_file)
             acc = correct/len(dataloader.dataset)
             test_accs.append(acc)
 
@@ -393,7 +431,9 @@ class Trainer:
         self.fold_best_OOD = {
             "Dataset A": [],
             "Dataset Bc": [],
-            "Dataset Bn": []
+            "Dataset Bn": [],
+            "Y18_Original": [],
+            "Y18_Codec": [],
         }
         
         #loop for all folds

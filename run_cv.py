@@ -13,16 +13,3 @@ if __name__ == "__main__":
 
     # trainer.train_cv()
     trainer.test_OOD_cv()
-    # trainer.test()    
-    # Start training
-    # with tqdm(total=trainer.n_epoch) as pbar:
-    #     for epoch in range(1, trainer.n_epoch + 1):
-    #         trainer.train(epoch, pbar)
-    #         trainer.test(epoch, pbar)
-    #         trainer.scheduler.step()
-
-    # Perform prediction using the trained model
-    # Example prediction with a sample tensor
-    # sample_tensor = ...
-    # prediction = trainer.predict(sample_tensor)
-    # print("Prediction:", prediction)
